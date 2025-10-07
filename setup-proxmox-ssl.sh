@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Proxmox SSL Certificate Setup Script
-# Uses Let's Encrypt with Cloudflare DNS-01 challenge
+# Uses Proxmox's built-in ACME functionality with Cloudflare DNS-01 challenge
 
 set -euo pipefail
 
@@ -10,6 +10,8 @@ DOMAIN=""
 EMAIL=""
 CF_TOKEN=""
 PROXMOX_TYPE=""
+PROXMOX_API_URL=""
+PROXMOX_API_TOKEN=""
 
 # Usage function
 usage() {
@@ -23,14 +25,16 @@ REQUIRED ARGUMENTS:
     -p, --proxmox-type TYPE    Proxmox installation type (ve or pbs)
 
 OPTIONS:
+    -a, --api-url URL          Proxmox API URL (default: https://localhost:8006)
+    -k, --api-token TOKEN      Proxmox API token (if not provided, will use local auth)
     -h, --help                 Show this help message and exit
 
 EXAMPLES:
-    # For Proxmox VE installation
+    # For Proxmox VE installation (local)
     $0 -d proxmox.example.com -e admin@example.com -t your_cf_token -p ve
 
-    # For Proxmox Backup Server installation
-    $0 -d pbs.example.com -e admin@example.com -t your_cf_token -p pbs
+    # For Proxmox Backup Server installation (remote)
+    $0 -d pbs.example.com -e admin@example.com -t your_cf_token -p pbs -a https://proxmox.example.com:8006 -k user@pam!tokenid=secret
 
 ENVIRONMENT VARIABLES:
     This script requires the following to be set or provided as arguments:
@@ -38,12 +42,15 @@ ENVIRONMENT VARIABLES:
     - EMAIL: Email for Let's Encrypt certificate registration
     - CF_TOKEN: Cloudflare API token with Zone:Read and DNS:Edit permissions
     - PROXMOX_TYPE: Either 've' (Proxmox VE) or 'pbs' (Proxmox Backup Server)
+    - PROXMOX_API_URL: Proxmox API URL (optional, defaults to localhost)
+    - PROXMOX_API_TOKEN: Proxmox API token (optional, uses local auth if not provided)
 
 PREREQUISITES:
-    - Must be run as root
+    - Must be run as root (for local Proxmox) or have API access
     - Proxmox must be installed and running
     - Domain must point to this server's IP address
     - Cloudflare API token with appropriate permissions
+    - curl and jq must be installed
 
 EOF
 }
@@ -66,6 +73,14 @@ parse_args() {
                 ;;
             -p|--proxmox-type)
                 PROXMOX_TYPE="$2"
+                shift 2
+                ;;
+            -a|--api-url)
+                PROXMOX_API_URL="$2"
+                shift 2
+                ;;
+            -k|--api-token)
+                PROXMOX_API_TOKEN="$2"
                 shift 2
                 ;;
             -h|--help)
@@ -111,6 +126,11 @@ parse_args() {
         usage
         exit 1
     fi
+
+    # Set default API URL if not provided
+    if [[ -z "$PROXMOX_API_URL" ]]; then
+        PROXMOX_API_URL="https://localhost:8006"
+    fi
 }
 
 # Colors
@@ -136,165 +156,165 @@ warn() {
 check_prerequisites() {
     log "Checking prerequisites..."
     
-    # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        error "This script must be run as root"
+    # Check if running as root (for local Proxmox) or have API access
+    if [[ -z "$PROXMOX_API_TOKEN" && $EUID -ne 0 ]]; then
+        error "This script must be run as root for local Proxmox or provide API token for remote access"
     fi
     
-    # Detect OS
-    if [[ -f /etc/debian_version ]]; then
-        OS="debian"
-    elif [[ -f /etc/redhat-release ]]; then
-        OS="redhat"
-    else
-        error "Unsupported operating system"
+    # Check required tools
+    if ! command -v curl &> /dev/null; then
+        error "curl is required but not installed"
     fi
     
-    # Check if Proxmox is installed
-    if [[ "$PROXMOX_TYPE" == "ve" ]]; then
-        if ! command -v pveversion &> /dev/null; then
-            error "Proxmox VE is not installed or not accessible"
-        fi
-        log "Proxmox VE version: $(pveversion)"
-    elif [[ "$PROXMOX_TYPE" == "pbs" ]]; then
-        if ! command -v proxmox-backup-manager &> /dev/null; then
-            error "Proxmox Backup Server is not installed or not accessible"
-        fi
-        log "Proxmox Backup Server detected"
+    if ! command -v jq &> /dev/null; then
+        error "jq is required but not installed"
+    fi
+    
+    # Check if Proxmox is accessible
+    if ! check_proxmox_connection; then
+        error "Cannot connect to Proxmox API at $PROXMOX_API_URL"
     fi
     
     log "Prerequisites check passed"
 }
 
-# Install certbot
-install_certbot() {
-    log "Installing certbot and Cloudflare plugin..."
-    
-    if [[ "$OS" == "debian" ]]; then
-        apt-get update
-        apt-get install -y certbot python3-certbot-dns-cloudflare
-    elif [[ "$OS" == "redhat" ]]; then
-        yum install -y epel-release
-        yum install -y certbot python3-certbot-dns-cloudflare
+# Check Proxmox connection
+check_proxmox_connection() {
+    local response
+    if [[ -n "$PROXMOX_API_TOKEN" ]]; then
+        response=$(curl -s -k -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" "${PROXMOX_API_URL}/api2/json/version" 2>/dev/null)
+    else
+        response=$(curl -s -k "${PROXMOX_API_URL}/api2/json/version" 2>/dev/null)
     fi
     
-    log "Certbot installed successfully"
-}
-
-# Setup Cloudflare credentials
-setup_cloudflare() {
-    log "Setting up Cloudflare credentials..."
-    
-    mkdir -p /etc/letsencrypt
-    
-    cat > /etc/letsencrypt/cloudflare.ini << EOF
-# Cloudflare API token
-dns_cloudflare_api_token = ${CF_TOKEN}
-EOF
-    
-    chmod 600 /etc/letsencrypt/cloudflare.ini
-    
-    log "Cloudflare credentials configured"
-}
-
-# Request certificate
-request_certificate() {
-    log "Requesting Let's Encrypt certificate for $DOMAIN..."
-    
-    certbot certonly \
-        --non-interactive \
-        --agree-tos \
-        --email "$EMAIL" \
-        --dns-cloudflare \
-        --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-        --dns-cloudflare-propagation-seconds 60 \
-        -d "$DOMAIN"
-    
-    if [[ $? -eq 0 ]]; then
-        log "Certificate obtained successfully!"
+    if echo "$response" | jq -e '.data' > /dev/null 2>&1; then
+        local version=$(echo "$response" | jq -r '.data.version')
+        log "Connected to Proxmox version: $version"
+        return 0
     else
-        error "Failed to obtain certificate"
+        return 1
     fi
 }
 
-# Configure Proxmox VE
-configure_proxmox_ve() {
-    log "Configuring Proxmox VE..."
+# Register ACME account
+register_acme_account() {
+    log "Registering ACME account..."
     
-    # Backup current configuration
-    cp /etc/pve/local/pve-ssl.pem /etc/pve/local/pve-ssl.pem.backup.$(date +%Y%m%d%H%M%S) 2>/dev/null || true
-    cp /etc/pve/local/pve-ssl.key /etc/pve/local/pve-ssl.key.backup.$(date +%Y%m%d%H%M%S) 2>/dev/null || true
-    
-    # Copy certificates
-    cp /etc/letsencrypt/live/${DOMAIN}/fullchain.pem /etc/pve/local/pve-ssl.pem
-    cp /etc/letsencrypt/live/${DOMAIN}/privkey.pem /etc/pve/local/pve-ssl.key
-    
-    # Set proper permissions
-    chown root:www-data /etc/pve/local/pve-ssl.pem /etc/pve/local/pve-ssl.key
-    chmod 640 /etc/pve/local/pve-ssl.pem /etc/pve/local/pve-ssl.key
-    
-    # Restart Proxmox services
-    log "Restarting Proxmox services..."
-    systemctl restart pveproxy
-    systemctl restart pvedaemon
-    
-    log "Proxmox VE configured successfully"
-}
-
-# Configure Proxmox Backup Server
-configure_proxmox_pbs() {
-    log "Configuring Proxmox Backup Server..."
-    
-    # Backup current configuration
-    cp /etc/proxmox-backup/proxy.pem /etc/proxmox-backup/proxy.pem.backup.$(date +%Y%m%d%H%M%S) 2>/dev/null || true
-    cp /etc/proxmox-backup/proxy.key /etc/proxmox-backup/proxy.key.backup.$(date +%Y%m%d%H%M%S) 2>/dev/null || true
-    
-    # Copy certificates
-    cp /etc/letsencrypt/live/${DOMAIN}/fullchain.pem /etc/proxmox-backup/proxy.pem
-    cp /etc/letsencrypt/live/${DOMAIN}/privkey.pem /etc/proxmox-backup/proxy.key
-    
-    # Set proper permissions
-    chown root:backup /etc/proxmox-backup/proxy.pem /etc/proxmox-backup/proxy.key
-    chmod 640 /etc/proxmox-backup/proxy.pem /etc/proxmox-backup/proxy.key
-    
-    # Restart Proxmox Backup Server services
-    log "Restarting Proxmox Backup Server services..."
-    systemctl restart proxmox-backup-proxy
-    
-    log "Proxmox Backup Server configured successfully"
-}
-
-# Setup auto-renewal
-setup_renewal() {
-    log "Setting up automatic renewal..."
-    
-    # Create renewal hook script
-    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-    
-    cat > /etc/letsencrypt/renewal-hooks/deploy/proxmox-reload.sh << 'EOF'
-#!/bin/bash
-# Reload Proxmox after certificate renewal
-
-if command -v pveversion &> /dev/null; then
-    echo "Reloading Proxmox VE services..."
-    systemctl reload pveproxy
-    systemctl reload pvedaemon
-elif command -v proxmox-backup-manager &> /dev/null; then
-    echo "Reloading Proxmox Backup Server services..."
-    systemctl reload proxmox-backup-proxy
-fi
-EOF
-    
-    chmod +x /etc/letsencrypt/renewal-hooks/deploy/proxmox-reload.sh
-    
-    # Test renewal
-    log "Testing certificate renewal..."
-    certbot renew --dry-run
-    
-    if [[ $? -eq 0 ]]; then
-        log "Auto-renewal configured successfully"
+    local response
+    if [[ -n "$PROXMOX_API_TOKEN" ]]; then
+        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/accounts" \
+            -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
+            -d "name=letsencrypt" \
+            -d "email=${EMAIL}" \
+            -d "directory=https://acme-v02.api.letsencrypt.org/directory")
     else
-        warn "Auto-renewal test failed. Please check configuration."
+        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/accounts" \
+            -d "name=letsencrypt" \
+            -d "email=${EMAIL}" \
+            -d "directory=https://acme-v02.api.letsencrypt.org/directory")
+    fi
+    
+    if echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
+        log "ACME account registered successfully"
+    else
+        local error_msg=$(echo "$response" | jq -r '.errors[0].message // "Unknown error"' 2>/dev/null || echo "Failed to parse response")
+        if [[ "$error_msg" == "null" || "$error_msg" == "Unknown error" ]]; then
+            log "ACME account may already exist or was registered successfully"
+        else
+            error "Failed to register ACME account: $error_msg"
+        fi
+    fi
+}
+
+# Configure Cloudflare DNS challenge plugin
+configure_cloudflare_plugin() {
+    log "Configuring Cloudflare DNS challenge plugin..."
+    
+    local response
+    if [[ -n "$PROXMOX_API_TOKEN" ]]; then
+        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/plugins" \
+            -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
+            -d "id=cloudflare" \
+            -d "type=dns" \
+            -d "api=cloudflare" \
+            -d "data=api_token=${CF_TOKEN}")
+    else
+        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/plugins" \
+            -d "id=cloudflare" \
+            -d "type=dns" \
+            -d "api=cloudflare" \
+            -d "data=api_token=${CF_TOKEN}")
+    fi
+    
+    if echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
+        log "Cloudflare plugin configured successfully"
+    else
+        local error_msg=$(echo "$response" | jq -r '.errors[0].message // "Unknown error"' 2>/dev/null || echo "Failed to parse response")
+        if [[ "$error_msg" == "null" || "$error_msg" == "Unknown error" ]]; then
+            log "Cloudflare plugin may already exist or was configured successfully"
+        else
+            error "Failed to configure Cloudflare plugin: $error_msg"
+        fi
+    fi
+}
+
+# Order certificate
+order_certificate() {
+    log "Ordering certificate for $DOMAIN..."
+    
+    local response
+    if [[ -n "$PROXMOX_API_TOKEN" ]]; then
+        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme" \
+            -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
+            -d "name=letsencrypt" \
+            -d "domain=${DOMAIN}" \
+            -d "plugin=cloudflare")
+    else
+        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme" \
+            -d "name=letsencrypt" \
+            -d "domain=${DOMAIN}" \
+            -d "plugin=cloudflare")
+    fi
+    
+    if echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
+        log "Certificate order initiated successfully"
+    else
+        local error_msg=$(echo "$response" | jq -r '.errors[0].message // "Unknown error"' 2>/dev/null || echo "Failed to parse response")
+        error "Failed to order certificate: $error_msg"
+    fi
+}
+
+# Check certificate status
+check_certificate_status() {
+    log "Checking certificate status..."
+    
+    local response
+    if [[ -n "$PROXMOX_API_TOKEN" ]]; then
+        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme" \
+            -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}")
+    else
+        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme")
+    fi
+    
+    if echo "$response" | jq -e '.data[] | select(.domain == "'"$DOMAIN"'")' > /dev/null 2>&1; then
+        local cert_info=$(echo "$response" | jq -r '.data[] | select(.domain == "'"$DOMAIN"'")')
+        local status=$(echo "$cert_info" | jq -r '.status // "unknown"')
+        local fingerprint=$(echo "$cert_info" | jq -r '.fingerprint // "unknown"')
+        
+        log "Certificate found for $DOMAIN"
+        log "Status: $status"
+        log "Fingerprint: $fingerprint"
+        
+        if [[ "$status" == "valid" ]]; then
+            log "Certificate is valid and ready to use"
+            return 0
+        else
+            warn "Certificate status is: $status"
+            return 1
+        fi
+    else
+        warn "No certificate found for $DOMAIN"
+        return 1
     fi
 }
 
@@ -302,26 +322,34 @@ EOF
 verify_certificate() {
     log "Verifying certificate installation..."
     
-    # Wait for services to be ready
-    sleep 10
+    # Wait for certificate processing
+    log "Waiting for certificate to be processed..."
+    sleep 30
     
-    # Check HTTPS
-    if curl -ksI "https://${DOMAIN}:8006" | grep -q "200 OK\|302 Found"; then
-        log "Proxmox VE HTTPS is working!"
-    elif curl -ksI "https://${DOMAIN}:8007" | grep -q "200 OK\|302 Found"; then
-        log "Proxmox Backup Server HTTPS is working!"
+    # Check certificate status
+    if check_certificate_status; then
+        log "Certificate verification successful!"
+        
+        # Check HTTPS connectivity
+        local port
+        if [[ "$PROXMOX_TYPE" == "ve" ]]; then
+            port="8006"
+        else
+            port="8007"
+        fi
+        
+        if curl -ksI "https://${DOMAIN}:${port}" | grep -q "200 OK\|302 Found"; then
+            log "Proxmox HTTPS is working on port ${port}!"
+        else
+            warn "HTTPS check failed. Proxmox might still be starting up."
+        fi
+        
+        # Show certificate info
+        log "Certificate details:"
+        openssl s_client -connect "${DOMAIN}:${port}" -servername "${DOMAIN}" < /dev/null 2>/dev/null | \
+            openssl x509 -noout -subject -issuer -dates 2>/dev/null || warn "Could not retrieve certificate details"
     else
-        warn "HTTPS check failed. Proxmox might still be starting up."
-    fi
-    
-    # Show certificate info
-    log "Certificate details:"
-    if [[ "$PROXMOX_TYPE" == "ve" ]]; then
-        openssl s_client -connect "${DOMAIN}:8006" -servername "${DOMAIN}" < /dev/null 2>/dev/null | \
-            openssl x509 -noout -subject -issuer -dates
-    else
-        openssl s_client -connect "${DOMAIN}:8007" -servername "${DOMAIN}" < /dev/null 2>/dev/null | \
-            openssl x509 -noout -subject -issuer -dates
+        error "Certificate verification failed"
     fi
 }
 
@@ -337,13 +365,15 @@ Proxmox SSL Certificate Setup Script
 Domain: $DOMAIN
 Email: $EMAIL
 Proxmox Type: $PROXMOX_TYPE
+API URL: $PROXMOX_API_URL
 ====================================
 
 This script will:
-1. Install certbot with Cloudflare plugin
-2. Request a Let's Encrypt certificate
-3. Configure Proxmox to use the certificate
-4. Setup automatic renewal
+1. Connect to Proxmox API
+2. Register ACME account with Let's Encrypt
+3. Configure Cloudflare DNS challenge plugin
+4. Order SSL certificate via Proxmox's built-in ACME
+5. Verify certificate installation
 
 EOF
 
@@ -354,19 +384,9 @@ EOF
     fi
     
     check_prerequisites
-    install_certbot
-    setup_cloudflare
-    request_certificate
-    
-    if [[ "$PROXMOX_TYPE" == "ve" ]]; then
-        configure_proxmox_ve
-    elif [[ "$PROXMOX_TYPE" == "pbs" ]]; then
-        configure_proxmox_pbs
-    else
-        error "Unknown Proxmox type: $PROXMOX_TYPE"
-    fi
-    
-    setup_renewal
+    register_acme_account
+    configure_cloudflare_plugin
+    order_certificate
     verify_certificate
     
     cat << EOF
@@ -374,15 +394,16 @@ EOF
 ${GREEN}✅ SSL Certificate Setup Complete!${NC}
 
 Your Proxmox instance is now accessible at:
-https://${DOMAIN}:8006${NC}
+https://${DOMAIN}:$(if [[ "$PROXMOX_TYPE" == "ve" ]]; then echo "8006"; else echo "8007"; fi)
 
-Certificate will auto-renew before expiration.
+Certificate will auto-renew via Proxmox's built-in ACME functionality.
 
-To manually renew:
-sudo certbot renew
+To check certificate status via API:
+curl -k "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme"
 
-To check certificate status:
-sudo certbot certificates
+To manage certificates via Proxmox GUI:
+Datacenter → ACME → Accounts
+System → Certificates
 
 ${YELLOW}Note: DNS must point to this server's IP for the certificate to work externally.${NC}
 

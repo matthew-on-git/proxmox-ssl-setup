@@ -5,7 +5,7 @@
 ### 1. Download and Setup
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/proxmox-ssl-setup.git
+git clone https://github.com/matthew-on-git/proxmox-ssl-setup.git
 cd proxmox-ssl-setup
 
 # Make scripts executable
@@ -20,20 +20,26 @@ sudo ./test-ssl-setup.sh
 
 ### 3. Run the SSL Setup
 ```bash
-# For Proxmox VE
+# For Proxmox VE (local)
 sudo ./setup-proxmox-ssl.sh -d proxmox.example.com -e admin@example.com -t your_cf_token -p ve
 
-# For Proxmox Backup Server
-sudo ./setup-proxmox-ssl.sh -d pbs.example.com -e admin@example.com -t your_cf_token -p pbs
+# For Proxmox VE (remote with API token)
+./setup-proxmox-ssl.sh -d proxmox.example.com -e admin@example.com -t your_cf_token -p ve \
+  -a https://proxmox.example.com:8006 -k user@pam!tokenid=secret
+
+# For Proxmox Backup Server (remote)
+./setup-proxmox-ssl.sh -d pbs.example.com -e admin@example.com -t your_cf_token -p pbs \
+  -a https://pbs.example.com:8007 -k user@pam!tokenid=secret
 ```
 
 ## 📋 Prerequisites Checklist
 
-- [ ] Root access to Proxmox server
+- [ ] Root access to Proxmox server (for local) OR API token (for remote)
 - [ ] Proxmox VE or Proxmox Backup Server installed
 - [ ] Domain pointing to server IP
 - [ ] Cloudflare API token with Zone:Read and DNS:Edit permissions
 - [ ] Internet connectivity
+- [ ] curl and jq installed
 
 ## 🔧 What You Need
 
@@ -41,6 +47,7 @@ sudo ./setup-proxmox-ssl.sh -d pbs.example.com -e admin@example.com -t your_cf_t
 2. **Email Address**: For Let's Encrypt registration
 3. **Cloudflare API Token**: With appropriate permissions
 4. **Proxmox Type**: Either `ve` (Proxmox VE) or `pbs` (Proxmox Backup Server)
+5. **Proxmox API Access**: Either root access (local) or API token (remote)
 
 ## 📚 More Information
 
@@ -58,14 +65,15 @@ sudo ./setup-proxmox-ssl.sh -d pbs.example.com -e admin@example.com -t your_cf_t
 ## 🎯 Success Indicators
 
 After successful setup, you should see:
-- ✅ Certificate obtained successfully
-- ✅ Proxmox configured successfully
-- ✅ Auto-renewal configured successfully
+- ✅ ACME account registered successfully
+- ✅ Cloudflare plugin configured successfully
+- ✅ Certificate order initiated successfully
+- ✅ Certificate verification successful
 - ✅ HTTPS is working on the correct port (8006 for VE, 8007 for PBS)
 
 ## 🔄 Maintenance
 
-- Certificates auto-renew before expiration
-- Manual renewal: `sudo certbot renew`
-- Check status: `sudo certbot certificates`
+- Certificates auto-renew via Proxmox's built-in ACME functionality
+- Check certificate status via API: `curl -k "https://proxmox:8006/api2/json/nodes/proxmox/certificates/acme"`
+- Manage certificates via Proxmox GUI: Datacenter → ACME → Accounts, System → Certificates
 - View logs: `journalctl -u pveproxy` (VE) or `journalctl -u proxmox-backup-proxy` (PBS)
