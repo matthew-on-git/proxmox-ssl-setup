@@ -181,103 +181,149 @@ check_prerequisites() {
 # Check Proxmox connection
 check_proxmox_connection() {
     local response
+    local http_code
+    
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
-        response=$(curl -s -k -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" "${PROXMOX_API_URL}/api2/json/version" 2>/dev/null)
+        response=$(curl -s -k -w "%{http_code}" -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" "${PROXMOX_API_URL}/api2/json/version" 2>/dev/null)
+        http_code="${response: -3}"
+        response="${response%???}"
     else
-        response=$(curl -s -k "${PROXMOX_API_URL}/api2/json/version" 2>/dev/null)
+        response=$(curl -s -k -w "%{http_code}" "${PROXMOX_API_URL}/api2/json/version" 2>/dev/null)
+        http_code="${response: -3}"
+        response="${response%???}"
     fi
     
-    if echo "$response" | jq -e '.data' > /dev/null 2>&1; then
+    # Check if we got a valid response
+    if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data' > /dev/null 2>&1; then
         local version=$(echo "$response" | jq -r '.data.version')
         log "Connected to Proxmox version: $version"
         return 0
+    elif [[ "$http_code" == "401" ]]; then
+        error "Authentication failed. Please check your API token."
+    elif [[ "$http_code" == "000" ]]; then
+        error "Cannot connect to Proxmox API. Check if the server is running and accessible."
     else
-        return 1
+        error "Proxmox API returned HTTP $http_code. Response: $response"
     fi
 }
 
-# Register ACME account
+# Register ACME account (Datacenter Level)
 register_acme_account() {
-    log "Registering ACME account..."
+    log "Registering ACME account at datacenter level..."
     
     local response
+    local http_code
+    
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
-        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/accounts" \
+        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/accounts" \
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
             -d "name=letsencrypt" \
             -d "email=${EMAIL}" \
             -d "directory=https://acme-v02.api.letsencrypt.org/directory")
+        http_code="${response: -3}"
+        response="${response%???}"
     else
-        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/accounts" \
+        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/accounts" \
             -d "name=letsencrypt" \
             -d "email=${EMAIL}" \
             -d "directory=https://acme-v02.api.letsencrypt.org/directory")
+        http_code="${response: -3}"
+        response="${response%???}"
     fi
     
-    if echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
-        log "ACME account registered successfully"
-    else
-        local error_msg=$(echo "$response" | jq -r '.errors[0].message // "Unknown error"' 2>/dev/null || echo "Failed to parse response")
-        if [[ "$error_msg" == "null" || "$error_msg" == "Unknown error" ]]; then
-            log "ACME account may already exist or was registered successfully"
+    log "ACME account API response: HTTP $http_code"
+    log "Response body: $response"
+    
+    if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
+        log "ACME account registered successfully at datacenter level"
+    elif [[ "$http_code" == "400" ]] && echo "$response" | jq -e '.errors[0].message' > /dev/null 2>&1; then
+        local error_msg=$(echo "$response" | jq -r '.errors[0].message')
+        if [[ "$error_msg" == *"already exists"* ]]; then
+            log "ACME account already exists at datacenter level"
         else
             error "Failed to register ACME account: $error_msg"
         fi
+    else
+        error "Failed to register ACME account. HTTP $http_code. Response: $response"
     fi
 }
 
-# Configure Cloudflare DNS challenge plugin
+# Configure Cloudflare DNS challenge plugin (Datacenter Level)
 configure_cloudflare_plugin() {
-    log "Configuring Cloudflare DNS challenge plugin..."
+    log "Configuring Cloudflare DNS challenge plugin at datacenter level..."
     
     local response
+    local http_code
+    
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
-        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/plugins" \
+        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/plugins" \
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
             -d "id=cloudflare" \
             -d "type=dns" \
             -d "api=cloudflare" \
             -d "data=api_token=${CF_TOKEN}")
+        http_code="${response: -3}"
+        response="${response%???}"
     else
-        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/plugins" \
+        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/plugins" \
             -d "id=cloudflare" \
             -d "type=dns" \
             -d "api=cloudflare" \
             -d "data=api_token=${CF_TOKEN}")
+        http_code="${response: -3}"
+        response="${response%???}"
     fi
     
-    if echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
-        log "Cloudflare plugin configured successfully"
-    else
-        local error_msg=$(echo "$response" | jq -r '.errors[0].message // "Unknown error"' 2>/dev/null || echo "Failed to parse response")
-        if [[ "$error_msg" == "null" || "$error_msg" == "Unknown error" ]]; then
-            log "Cloudflare plugin may already exist or was configured successfully"
+    log "Cloudflare plugin API response: HTTP $http_code"
+    log "Response body: $response"
+    
+    if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
+        log "Cloudflare plugin configured successfully at datacenter level"
+    elif [[ "$http_code" == "400" ]] && echo "$response" | jq -e '.errors[0].message' > /dev/null 2>&1; then
+        local error_msg=$(echo "$response" | jq -r '.errors[0].message')
+        if [[ "$error_msg" == *"already exists"* ]]; then
+            log "Cloudflare plugin already exists at datacenter level"
         else
             error "Failed to configure Cloudflare plugin: $error_msg"
         fi
+    else
+        error "Failed to configure Cloudflare plugin. HTTP $http_code. Response: $response"
     fi
 }
 
-# Order certificate
+# Order certificate (Node Level)
 order_certificate() {
-    log "Ordering certificate for $DOMAIN..."
+    log "Ordering certificate for $DOMAIN at node level..."
+    
+    # Extract node name from domain (assume it's the first part before the first dot)
+    local node_name=$(echo "$DOMAIN" | cut -d'.' -f1)
+    log "Using node name: $node_name"
     
     local response
+    local http_code
+    
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
-        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme" \
+        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme" \
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
             -d "name=letsencrypt" \
             -d "domain=${DOMAIN}" \
             -d "plugin=cloudflare")
+        http_code="${response: -3}"
+        response="${response%???}"
     else
-        response=$(curl -s -k -X POST "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme" \
+        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme" \
             -d "name=letsencrypt" \
             -d "domain=${DOMAIN}" \
             -d "plugin=cloudflare")
+        http_code="${response: -3}"
+        response="${response%???}"
     fi
     
-    if echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
-        log "Certificate order initiated successfully"
+    log "Certificate order API response: HTTP $http_code"
+    log "Response body: $response"
+    
+    if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
+        log "Certificate order initiated successfully at node level"
     else
         local error_msg=$(echo "$response" | jq -r '.errors[0].message // "Unknown error"' 2>/dev/null || echo "Failed to parse response")
         error "Failed to order certificate: $error_msg"
@@ -288,12 +334,16 @@ order_certificate() {
 check_certificate_status() {
     log "Checking certificate status..."
     
+    # Extract node name from domain (assume it's the first part before the first dot)
+    local node_name=$(echo "$DOMAIN" | cut -d'.' -f1)
+    log "Using node name: $node_name"
+    
     local response
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
-        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme" \
+        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme" \
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}")
     else
-        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/proxmox/certificates/acme")
+        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme")
     fi
     
     if echo "$response" | jq -e '.data[] | select(.domain == "'"$DOMAIN"'")' > /dev/null 2>&1; then
@@ -324,7 +374,7 @@ verify_certificate() {
     
     # Wait for certificate processing
     log "Waiting for certificate to be processed..."
-    sleep 30
+    sleep 60
     
     # Check certificate status
     if check_certificate_status; then
@@ -340,12 +390,12 @@ verify_certificate() {
         
         if curl -ksI "https://${DOMAIN}:${port}" | grep -q "200 OK\|302 Found"; then
             log "Proxmox HTTPS is working on port ${port}!"
-        else
-            warn "HTTPS check failed. Proxmox might still be starting up."
-        fi
-        
-        # Show certificate info
-        log "Certificate details:"
+    else
+        warn "HTTPS check failed. Proxmox might still be starting up."
+    fi
+    
+    # Show certificate info
+    log "Certificate details:"
         openssl s_client -connect "${DOMAIN}:${port}" -servername "${DOMAIN}" < /dev/null 2>/dev/null | \
             openssl x509 -noout -subject -issuer -dates 2>/dev/null || warn "Could not retrieve certificate details"
     else
