@@ -1,0 +1,36 @@
+# Backup files
+*.backup.*
+*.bak
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Certificate files (security)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Cloudflare credentials
+cloudflare.ini
