@@ -34,3 +34,6 @@ Thumbs.db
 
 # Cloudflare credentials
 cloudflare.ini
+
+# Environment variables
+*.env 
