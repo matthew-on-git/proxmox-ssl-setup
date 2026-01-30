@@ -289,18 +289,20 @@ configure_cloudflare_plugin() {
             error "Failed to configure Cloudflare plugin. HTTP $http_code. Response: $response"
         fi
     else
-        log "Using pvesh to configure Cloudflare plugin..."
-        if response=$(pvesh create /cluster/acme/plugins \
-            --id cloudflare \
-            --type dns \
-            --api cf \
-            --data "CF_Token=${CF_TOKEN}" 2>&1); then
+        log "Using pvenode to configure Cloudflare plugin..."
+        local tmpdata
+        tmpdata=$(mktemp)
+        echo "CF_Token=${CF_TOKEN}" > "$tmpdata"
+        chmod 600 "$tmpdata"
+        if response=$(pvenode acme plugin add dns cloudflare --api cf --data "$tmpdata" 2>&1); then
             log "Cloudflare plugin configured successfully at datacenter level"
         elif echo "$response" | grep -qi "already exists"; then
             log "Cloudflare plugin already exists at datacenter level"
         else
+            rm -f "$tmpdata"
             error "Failed to configure Cloudflare plugin: $response"
         fi
+        rm -f "$tmpdata"
     fi
 }
 
