@@ -35,7 +35,7 @@ This script automates the process of:
 
 1. **Download the script** to your Proxmox server:
    ```bash
-   wget [https://raw.githubusercontent.com/matthew-on-git/proxmox-ssl-setup/main/setup-proxmox-ssl.sh](https://raw.githubusercontent.com/matthew-on-git/proxmox-ssl-setup/refs/heads/master/setup-proxmox-ssl.sh)
+   wget https://raw.githubusercontent.com/matthew-on-git/proxmox-ssl-setup/refs/heads/master/setup-proxmox-ssl.sh
    chmod +x setup-proxmox-ssl.sh
    ```
 
