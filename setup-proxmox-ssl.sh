@@ -248,7 +248,7 @@ register_acme_account() {
         log "Using pvesh to register ACME account..."
         if response=$(pvesh create /cluster/acme/account \
             --name letsencrypt \
-            --contact "mailto:${EMAIL}" \
+            --contact "${EMAIL}" \
             --directory "https://acme-v02.api.letsencrypt.org/directory" 2>&1); then
             log "ACME account registered successfully at datacenter level"
         elif echo "$response" | grep -qi "already exists"; then
