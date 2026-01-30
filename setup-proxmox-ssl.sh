@@ -165,9 +165,16 @@ check_prerequisites() {
     if ! command -v curl &> /dev/null; then
         error "curl is required but not installed"
     fi
-    
+
     if ! command -v jq &> /dev/null; then
         error "jq is required but not installed"
+    fi
+
+    # Check for pvesh when running locally without API token
+    if [[ -z "$PROXMOX_API_TOKEN" ]]; then
+        if ! command -v pvesh &> /dev/null; then
+            error "pvesh is required for local access but not found. Are you running on a Proxmox host?"
+        fi
     fi
     
     # Check if Proxmox is accessible
@@ -181,187 +188,206 @@ check_prerequisites() {
 # Check Proxmox connection
 check_proxmox_connection() {
     local response
-    local http_code
-    
+
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
+        local http_code
         response=$(curl -s -k -w "%{http_code}" -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" "${PROXMOX_API_URL}/api2/json/version" 2>/dev/null)
         http_code="${response: -3}"
         response="${response%???}"
+
+        if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data' > /dev/null 2>&1; then
+            local version=$(echo "$response" | jq -r '.data.version')
+            log "Connected to Proxmox version: $version"
+            return 0
+        elif [[ "$http_code" == "401" ]]; then
+            error "Authentication failed. Please check your API token."
+        elif [[ "$http_code" == "000" ]]; then
+            error "Cannot connect to Proxmox API. Check if the server is running and accessible."
+        else
+            error "Proxmox API returned HTTP $http_code. Response: $response"
+        fi
     else
-        response=$(curl -s -k -w "%{http_code}" "${PROXMOX_API_URL}/api2/json/version" 2>/dev/null)
-        http_code="${response: -3}"
-        response="${response%???}"
-    fi
-    
-    # Check if we got a valid response
-    if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data' > /dev/null 2>&1; then
-        local version=$(echo "$response" | jq -r '.data.version')
-        log "Connected to Proxmox version: $version"
-        return 0
-    elif [[ "$http_code" == "401" ]]; then
-        error "Authentication failed. Please check your API token."
-    elif [[ "$http_code" == "000" ]]; then
-        error "Cannot connect to Proxmox API. Check if the server is running and accessible."
-    else
-        error "Proxmox API returned HTTP $http_code. Response: $response"
+        # Local mode: use pvesh which handles authentication as root
+        if response=$(pvesh get /version --output-format json 2>&1); then
+            local version=$(echo "$response" | jq -r '.version // "unknown"')
+            log "Connected to Proxmox version: $version"
+            return 0
+        else
+            error "Cannot connect to Proxmox API via pvesh: $response"
+        fi
     fi
 }
 
 # Register ACME account (Datacenter Level)
 register_acme_account() {
     log "Registering ACME account at datacenter level..."
-    
+
     local response
-    local http_code
-    
+
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
-        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/accounts" \
+        local http_code
+        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/account" \
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
             -d "name=letsencrypt" \
-            -d "email=${EMAIL}" \
+            -d "contact=mailto:${EMAIL}" \
             -d "directory=https://acme-v02.api.letsencrypt.org/directory")
         http_code="${response: -3}"
         response="${response%???}"
-    else
-        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/accounts" \
-            -d "name=letsencrypt" \
-            -d "email=${EMAIL}" \
-            -d "directory=https://acme-v02.api.letsencrypt.org/directory")
-        http_code="${response: -3}"
-        response="${response%???}"
-    fi
-    
-    log "ACME account API response: HTTP $http_code"
-    log "Response body: $response"
-    
-    if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
-        log "ACME account registered successfully at datacenter level"
-    elif [[ "$http_code" == "400" ]] && echo "$response" | jq -e '.errors[0].message' > /dev/null 2>&1; then
-        local error_msg=$(echo "$response" | jq -r '.errors[0].message')
-        if [[ "$error_msg" == *"already exists"* ]]; then
+
+        log "ACME account API response: HTTP $http_code"
+        log "Response body: $response"
+
+        if [[ "$http_code" == "200" ]]; then
+            log "ACME account registered successfully at datacenter level"
+        elif echo "$response" | grep -qi "already exists"; then
             log "ACME account already exists at datacenter level"
         else
-            error "Failed to register ACME account: $error_msg"
+            error "Failed to register ACME account. HTTP $http_code. Response: $response"
         fi
     else
-        error "Failed to register ACME account. HTTP $http_code. Response: $response"
+        log "Using pvesh to register ACME account..."
+        if response=$(pvesh create /cluster/acme/account \
+            --name letsencrypt \
+            --contact "mailto:${EMAIL}" \
+            --directory "https://acme-v02.api.letsencrypt.org/directory" 2>&1); then
+            log "ACME account registered successfully at datacenter level"
+        elif echo "$response" | grep -qi "already exists"; then
+            log "ACME account already exists at datacenter level"
+        else
+            error "Failed to register ACME account: $response"
+        fi
     fi
 }
 
 # Configure Cloudflare DNS challenge plugin (Datacenter Level)
 configure_cloudflare_plugin() {
     log "Configuring Cloudflare DNS challenge plugin at datacenter level..."
-    
+
     local response
-    local http_code
-    
+
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
+        local http_code
         response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/plugins" \
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
             -d "id=cloudflare" \
             -d "type=dns" \
             -d "api=cloudflare" \
-            -d "data=api_token=${CF_TOKEN}")
+            -d "data=CF_Token=${CF_TOKEN}")
         http_code="${response: -3}"
         response="${response%???}"
-    else
-        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/cluster/acme/plugins" \
-            -d "id=cloudflare" \
-            -d "type=dns" \
-            -d "api=cloudflare" \
-            -d "data=api_token=${CF_TOKEN}")
-        http_code="${response: -3}"
-        response="${response%???}"
-    fi
-    
-    log "Cloudflare plugin API response: HTTP $http_code"
-    log "Response body: $response"
-    
-    if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
-        log "Cloudflare plugin configured successfully at datacenter level"
-    elif [[ "$http_code" == "400" ]] && echo "$response" | jq -e '.errors[0].message' > /dev/null 2>&1; then
-        local error_msg=$(echo "$response" | jq -r '.errors[0].message')
-        if [[ "$error_msg" == *"already exists"* ]]; then
+
+        log "Cloudflare plugin API response: HTTP $http_code"
+        log "Response body: $response"
+
+        if [[ "$http_code" == "200" ]]; then
+            log "Cloudflare plugin configured successfully at datacenter level"
+        elif echo "$response" | grep -qi "already exists"; then
             log "Cloudflare plugin already exists at datacenter level"
         else
-            error "Failed to configure Cloudflare plugin: $error_msg"
+            error "Failed to configure Cloudflare plugin. HTTP $http_code. Response: $response"
         fi
     else
-        error "Failed to configure Cloudflare plugin. HTTP $http_code. Response: $response"
+        log "Using pvesh to configure Cloudflare plugin..."
+        if response=$(pvesh create /cluster/acme/plugins \
+            --id cloudflare \
+            --type dns \
+            --api cloudflare \
+            --data "CF_Token=${CF_TOKEN}" 2>&1); then
+            log "Cloudflare plugin configured successfully at datacenter level"
+        elif echo "$response" | grep -qi "already exists"; then
+            log "Cloudflare plugin already exists at datacenter level"
+        else
+            error "Failed to configure Cloudflare plugin: $response"
+        fi
     fi
 }
 
 # Order certificate (Node Level)
 order_certificate() {
     log "Ordering certificate for $DOMAIN at node level..."
-    
+
     # Extract node name from domain (assume it's the first part before the first dot)
     local node_name=$(echo "$DOMAIN" | cut -d'.' -f1)
     log "Using node name: $node_name"
-    
+
     local response
-    local http_code
-    
+
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
-        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme" \
+        local http_code
+
+        # Configure ACME domain on the node
+        log "Configuring ACME domain on node ${node_name}..."
+        response=$(curl -s -k -w "%{http_code}" -X PUT "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/config" \
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
-            -d "name=letsencrypt" \
-            -d "domain=${DOMAIN}" \
-            -d "plugin=cloudflare")
+            -d "acmedomain0=domain=${DOMAIN},plugin=cloudflare" \
+            -d "acme=account=letsencrypt")
         http_code="${response: -3}"
         response="${response%???}"
-    else
-        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme" \
-            -d "name=letsencrypt" \
-            -d "domain=${DOMAIN}" \
-            -d "plugin=cloudflare")
+        log "Node config API response: HTTP $http_code"
+
+        # Order the certificate
+        response=$(curl -s -k -w "%{http_code}" -X POST "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme/certificate" \
+            -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
+            -d "force=1")
         http_code="${response: -3}"
         response="${response%???}"
-    fi
-    
-    log "Certificate order API response: HTTP $http_code"
-    log "Response body: $response"
-    
-    if [[ "$http_code" == "200" ]] && echo "$response" | jq -e '.data == null' > /dev/null 2>&1; then
-        log "Certificate order initiated successfully at node level"
+
+        log "Certificate order API response: HTTP $http_code"
+        log "Response body: $response"
+
+        if [[ "$http_code" == "200" ]]; then
+            log "Certificate order initiated successfully at node level"
+        else
+            error "Failed to order certificate. HTTP $http_code. Response: $response"
+        fi
     else
-        local error_msg=$(echo "$response" | jq -r '.errors[0].message // "Unknown error"' 2>/dev/null || echo "Failed to parse response")
-        error "Failed to order certificate: $error_msg"
+        # Local mode: configure ACME on node, then order certificate
+        log "Using pvesh to configure ACME domain on node ${node_name}..."
+        if ! pvesh set "/nodes/${node_name}/config" \
+            --acmedomain0 "domain=${DOMAIN},plugin=cloudflare" \
+            --acme "account=letsencrypt" 2>&1; then
+            warn "Could not set ACME node config (may already be configured)"
+        fi
+
+        log "Using pvesh to order certificate..."
+        if response=$(pvesh create "/nodes/${node_name}/certificates/acme/certificate" --force 1 2>&1); then
+            log "Certificate order initiated successfully at node level"
+            log "Response: $response"
+        else
+            error "Failed to order certificate: $response"
+        fi
     fi
 }
 
 # Check certificate status
 check_certificate_status() {
     log "Checking certificate status..."
-    
+
     # Extract node name from domain (assume it's the first part before the first dot)
     local node_name=$(echo "$DOMAIN" | cut -d'.' -f1)
     log "Using node name: $node_name"
-    
+
     local response
+    local cert_info
+
     if [[ -n "$PROXMOX_API_TOKEN" ]]; then
-        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme" \
+        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/info" \
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}")
+        cert_info=$(echo "$response" | jq -r '.data[] | select(.san[] == "'"$DOMAIN"'")' 2>/dev/null)
     else
-        response=$(curl -s -k -X GET "${PROXMOX_API_URL}/api2/json/nodes/${node_name}/certificates/acme")
+        response=$(pvesh get "/nodes/${node_name}/certificates/info" --output-format json 2>&1) || true
+        cert_info=$(echo "$response" | jq -r '.[] | select(.san[] == "'"$DOMAIN"'")' 2>/dev/null)
     fi
-    
-    if echo "$response" | jq -e '.data[] | select(.domain == "'"$DOMAIN"'")' > /dev/null 2>&1; then
-        local cert_info=$(echo "$response" | jq -r '.data[] | select(.domain == "'"$DOMAIN"'")')
-        local status=$(echo "$cert_info" | jq -r '.status // "unknown"')
+
+    if [[ -n "$cert_info" ]]; then
         local fingerprint=$(echo "$cert_info" | jq -r '.fingerprint // "unknown"')
-        
+        local notafter=$(echo "$cert_info" | jq -r '.notafter // "unknown"')
+
         log "Certificate found for $DOMAIN"
-        log "Status: $status"
         log "Fingerprint: $fingerprint"
-        
-        if [[ "$status" == "valid" ]]; then
-            log "Certificate is valid and ready to use"
-            return 0
-        else
-            warn "Certificate status is: $status"
-            return 1
-        fi
+        log "Expires: $notafter"
+        log "Certificate is valid and ready to use"
+        return 0
     else
         warn "No certificate found for $DOMAIN"
         return 1
