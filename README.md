@@ -14,10 +14,10 @@ This script automates the process of:
 ## Prerequisites
 
 ### System Requirements
-- **Operating System**: Any system with curl and jq
-- **Access**: Root access (for local Proxmox) OR API token (for remote Proxmox)
+- **Local access**: Must be run as root directly on the Proxmox host (uses `pvesh` for authentication)
+- **Remote access**: Requires a Proxmox API token (`-k`) and API URL (`-a`)
 - **Internet Connectivity**: Required for Let's Encrypt certificate requests
-- **Tools**: curl and jq must be installed
+- **Tools**: `curl` and `jq` must be installed. `pvesh` is required for local access (included with Proxmox).
 
 ### Proxmox Requirements
 - Proxmox VE or Proxmox Backup Server must be installed and running
@@ -159,12 +159,16 @@ The script configures Proxmox's built-in ACME functionality:
 
 ## API Endpoints Used
 
-| Endpoint | Purpose |
-|----------|---------|
-| `/api2/json/version` | Check Proxmox connectivity |
-| `/api2/json/cluster/acme/accounts` | Register ACME account |
-| `/api2/json/cluster/acme/plugins` | Configure challenge plugin |
-| `/api2/json/nodes/proxmox/certificates/acme` | Order and manage certificates |
+When running locally, the script uses `pvesh` which maps to these same API paths. When running remotely, `curl` is used with the full URL.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/version` | GET | Check Proxmox connectivity |
+| `/cluster/acme/account` | POST | Register ACME account |
+| `/cluster/acme/plugins` | POST | Configure challenge plugin |
+| `/nodes/{node}/config` | PUT | Configure ACME domain on node |
+| `/nodes/{node}/certificates/acme/certificate` | POST | Order certificate |
+| `/nodes/{node}/certificates/info` | GET | Check certificate status |
 
 ## Ports
 
@@ -177,8 +181,8 @@ The script configures Proxmox's built-in ACME functionality:
 
 **1. API Connection Issues**
 ```bash
-# Check Proxmox API connectivity
-curl -k https://proxmox:8006/api2/json/version
+# Check local Proxmox connectivity (run as root on the Proxmox host)
+pvesh get /version --output-format json
 
 # For remote access, verify API token
 curl -k -H "Authorization: PVEAPIToken=user@pam!tokenid=secret" \
@@ -202,8 +206,12 @@ curl -k -H "Authorization: PVEAPIToken=user@pam!tokenid=secret" \
 
 ### Check Certificate Status
 ```bash
-# Via API
-curl -k https://proxmox:8006/api2/json/nodes/proxmox/certificates/acme
+# Local (run as root on Proxmox host)
+pvesh get /nodes/proxmox/certificates/info --output-format json
+
+# Remote (via API token)
+curl -k -H "Authorization: PVEAPIToken=user@pam!tokenid=secret" \
+  https://proxmox:8006/api2/json/nodes/proxmox/certificates/info
 
 # Via Proxmox GUI
 # Datacenter → ACME → Accounts
@@ -212,11 +220,20 @@ curl -k https://proxmox:8006/api2/json/nodes/proxmox/certificates/acme
 
 ### Manual Certificate Management
 ```bash
-# Order certificate via API
-curl -k -X POST https://proxmox:8006/api2/json/nodes/proxmox/certificates/acme \
-  -d "name=letsencrypt" \
-  -d "domain=proxmox.example.com" \
-  -d "plugin=cloudflare"
+# Local: configure ACME domain and order certificate
+pvesh set /nodes/proxmox/config \
+  --acmedomain0 "domain=proxmox.example.com,plugin=cloudflare" \
+  --acme "account=letsencrypt"
+pvesh create /nodes/proxmox/certificates/acme/certificate --force 1
+
+# Remote: same steps via curl with API token
+curl -k -X PUT https://proxmox:8006/api2/json/nodes/proxmox/config \
+  -H "Authorization: PVEAPIToken=user@pam!tokenid=secret" \
+  -d "acmedomain0=domain=proxmox.example.com,plugin=cloudflare" \
+  -d "acme=account=letsencrypt"
+curl -k -X POST https://proxmox:8006/api2/json/nodes/proxmox/certificates/acme/certificate \
+  -H "Authorization: PVEAPIToken=user@pam!tokenid=secret" \
+  -d "force=1"
 ```
 
 ### View Proxmox Logs
