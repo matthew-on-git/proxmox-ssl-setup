@@ -271,7 +271,7 @@ configure_cloudflare_plugin() {
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
             -d "id=cloudflare" \
             -d "type=dns" \
-            -d "api=cloudflare" \
+            -d "api=cf" \
             -d "data=CF_Token=${CF_TOKEN}")
         http_code="${response: -3}"
         response="${response%???}"
@@ -291,7 +291,7 @@ configure_cloudflare_plugin() {
         if response=$(pvesh create /cluster/acme/plugins \
             --id cloudflare \
             --type dns \
-            --api cloudflare \
+            --api cf \
             --data "CF_Token=${CF_TOKEN}" 2>&1); then
             log "Cloudflare plugin configured successfully at datacenter level"
         elif echo "$response" | grep -qi "already exists"; then
