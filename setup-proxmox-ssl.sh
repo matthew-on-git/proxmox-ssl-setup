@@ -230,7 +230,8 @@ register_acme_account() {
             -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN}" \
             -d "name=letsencrypt" \
             -d "contact=mailto:${EMAIL}" \
-            -d "directory=https://acme-v02.api.letsencrypt.org/directory")
+            -d "directory=https://acme-v02.api.letsencrypt.org/directory" \
+            -d "tos_url=https://letsencrypt.org/documents/LE-SA-v1.4-April-3-2024.pdf")
         http_code="${response: -3}"
         response="${response%???}"
 
@@ -249,7 +250,8 @@ register_acme_account() {
         if response=$(pvesh create /cluster/acme/account \
             --name letsencrypt \
             --contact "${EMAIL}" \
-            --directory "https://acme-v02.api.letsencrypt.org/directory" 2>&1); then
+            --directory "https://acme-v02.api.letsencrypt.org/directory" \
+            --tos_url "https://letsencrypt.org/documents/LE-SA-v1.4-April-3-2024.pdf" 2>&1); then
             log "ACME account registered successfully at datacenter level"
         elif echo "$response" | grep -qi "already exists"; then
             log "ACME account already exists at datacenter level"
